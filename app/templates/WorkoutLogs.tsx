@@ -30,7 +30,8 @@ interface WorkoutLog {
   created_at: string; 
 }
 
-export default function WorkoutLogs() {
+// Added globalClientId prop from Dashboard
+export default function WorkoutLogs({ globalClientId }: { globalClientId?: number | null }) {
   // --- LIVE DATABASE STATE ---
   const [logs, setLogs] = useState<WorkoutLog[]>([]);
   const [clientsList, setClientsList] = useState<ClientSnippet[]>([]);
@@ -43,7 +44,7 @@ export default function WorkoutLogs() {
   // Form State
   const [formData, setFormData] = useState<{
     date: string;
-    client_id: string; // Keep as string for the form input binding
+    client_id: string; 
     exercise_id: string;
     sets: WorkoutSet[];
   }>({
@@ -67,7 +68,6 @@ export default function WorkoutLogs() {
   const fetchData = async () => {
     setIsLoading(true);
     try {
-      // Fetch all three tables simultaneously for maximum speed
       const [clientsRes, exercisesRes, logsRes] = await Promise.all([
         supabase.from('clients').select('id, name').order('name'),
         supabase.from('exercise_library').select('id, name, muscle_group').order('name'),
@@ -84,12 +84,35 @@ export default function WorkoutLogs() {
     }
   };
 
+  // --- AUTO-SELECT CLIENT LOGIC ---
+  useEffect(() => {
+    if (globalClientId && clientsList.length > 0) {
+      const selectedClient = clientsList.find(c => c.id === globalClientId);
+      if (selectedClient && !editingId) {
+        setFormData(prev => ({ ...prev, client_id: selectedClient.id.toString() }));
+        setClientSearch(selectedClient.name);
+      }
+    } else if (!globalClientId && !editingId) {
+      setFormData(prev => ({ ...prev, client_id: '' }));
+      setClientSearch('');
+    }
+  }, [globalClientId, clientsList, editingId]);
+
   // --- DERIVED DATA ---
   const filteredClients = useMemo(() => clientsList.filter(c => c.name.toLowerCase().includes(clientSearch.toLowerCase())), [clientSearch, clientsList]);
   const filteredExercises = useMemo(() => exercisesList.filter(e => e.name.toLowerCase().includes(exerciseSearch.toLowerCase())), [exerciseSearch, exercisesList]);
 
-  const totalLogs = logs.length;
-  const totalVolume = logs.reduce((acc, log) => {
+  // Filter logs based on global selection
+  const displayLogs = useMemo(() => {
+    if (globalClientId) {
+      return logs.filter(log => log.client_id === globalClientId);
+    }
+    return logs;
+  }, [logs, globalClientId]);
+
+  // Calculate stats based strictly on displayLogs
+  const totalLogs = displayLogs.length;
+  const totalVolume = displayLogs.reduce((acc, log) => {
     return acc + log.sets.reduce((setAcc, set) => setAcc + ((Number(set.weight) || 0) * (Number(set.reps) || 0)), 0);
   }, 0);
 
@@ -128,7 +151,7 @@ export default function WorkoutLogs() {
       date: log.date,
       client_id: log.client_id.toString(),
       exercise_id: log.exercise_id.toString(),
-      sets: log.sets.map(set => ({ ...set })) // Deep copy
+      sets: log.sets.map(set => ({ ...set }))
     });
 
     const clientName = clientsList.find(c => c.id === log.client_id)?.name || '';
@@ -141,8 +164,14 @@ export default function WorkoutLogs() {
 
   const cancelEdit = () => {
     setEditingId(null);
-    setFormData({ date: new Date().toISOString().split('T')[0], client_id: '', exercise_id: '', sets: [{ weight: '', reps: '' }] });
-    setClientSearch('');
+    if (globalClientId) {
+      const selectedClient = clientsList.find(c => c.id === globalClientId);
+      setFormData({ date: new Date().toISOString().split('T')[0], client_id: selectedClient ? selectedClient.id.toString() : '', exercise_id: '', sets: [{ weight: '', reps: '' }] });
+      setClientSearch(selectedClient ? selectedClient.name : '');
+    } else {
+      setFormData({ date: new Date().toISOString().split('T')[0], client_id: '', exercise_id: '', sets: [{ weight: '', reps: '' }] });
+      setClientSearch('');
+    }
     setExerciseSearch('');
   };
 
@@ -158,36 +187,31 @@ export default function WorkoutLogs() {
         date: formData.date,
         client_id: parseInt(formData.client_id),
         exercise_id: parseInt(formData.exercise_id),
-        sets: formData.sets // Supabase automatically converts this array to JSONB!
+        sets: formData.sets 
       };
 
       if (editingId) {
-        // UPDATE
-        const { error } = await supabase
-          .from('workout_logs')
-          .update(payload)
-          .eq('id', editingId);
-          
+        const { error } = await supabase.from('workout_logs').update(payload).eq('id', editingId);
         if (error) throw error;
         
         setEditingId(null);
-        setClientSearch('');
+        if (globalClientId) {
+          const selectedClient = clientsList.find(c => c.id === globalClientId);
+          setFormData({ date: new Date().toISOString().split('T')[0], client_id: selectedClient ? selectedClient.id.toString() : '', exercise_id: '', sets: [{ weight: '', reps: '' }] });
+          setClientSearch(selectedClient ? selectedClient.name : '');
+        } else {
+          setFormData({ date: new Date().toISOString().split('T')[0], client_id: '', exercise_id: '', sets: [{ weight: '', reps: '' }] });
+          setClientSearch('');
+        }
         setExerciseSearch('');
-        setFormData({ date: new Date().toISOString().split('T')[0], client_id: '', exercise_id: '', sets: [{ weight: '', reps: '' }] });
       } else {
-        // INSERT
-        const { error } = await supabase
-          .from('workout_logs')
-          .insert([payload]);
-          
+        const { error } = await supabase.from('workout_logs').insert([payload]);
         if (error) throw error;
         
-        // Reset form but KEEP date and client to make logging multiple exercises faster!
         setFormData({ ...formData, exercise_id: '', sets: [{ weight: '', reps: '' }] });
         setExerciseSearch('');
       }
       
-      // Refresh live data
       await fetchData();
     } catch (error) {
       console.error("Error saving log:", error);
@@ -200,21 +224,21 @@ export default function WorkoutLogs() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
       
-      {/* --- HEADER --- */}
-      <div>
-        <h2 style={{ margin: 0, color: '#111827', fontSize: '1.8rem' }}>Workout Logs</h2>
-        <p style={{ margin: '4px 0 0 0', color: '#6b7280' }}>Track daily sets, reps, and volume progression.</p>
-      </div>
+      {/* The static header has been removed to rely on Dashboard.tsx's dynamic title */}
 
       {/* --- 1. TOP VISUALIZATIONS --- */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '24px' }}>
         <div style={{ background: '#fff', padding: '24px', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', borderLeft: '4px solid #2563eb' }}>
-          <h4 style={{ margin: '0 0 8px 0', color: '#6b7280' }}>Total Workouts Logged</h4>
+          <h4 style={{ margin: '0 0 8px 0', color: '#6b7280' }}>
+            {globalClientId ? 'Client Workouts Logged' : 'Total Workouts Logged'}
+          </h4>
           <span style={{ fontSize: '2.5rem', fontWeight: '900', color: '#111827' }}>{totalLogs}</span>
         </div>
         
         <div style={{ background: '#fff', padding: '24px', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', borderLeft: '4px solid #8b5cf6' }}>
-          <h4 style={{ margin: '0 0 8px 0', color: '#6b7280' }}>App-Wide Volume Lifted</h4>
+          <h4 style={{ margin: '0 0 8px 0', color: '#6b7280' }}>
+            {globalClientId ? 'Client Volume Lifted' : 'App-Wide Volume Lifted'}
+          </h4>
           <span style={{ fontSize: '2.5rem', fontWeight: '900', color: '#111827' }}>{totalVolume.toLocaleString()} <span style={{ fontSize: '1rem', color: '#6b7280' }}>kg</span></span>
         </div>
 
@@ -237,21 +261,25 @@ export default function WorkoutLogs() {
         <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
-            {/* Date Input */}
             <div>
               <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 'bold', marginBottom: '6px', color: '#374151' }}>Date</label>
               <input required type="date" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} />
             </div>
 
-            {/* Client Searchable Dropdown */}
             <div style={{ position: 'relative' }}>
-              <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 'bold', marginBottom: '6px', color: '#374151' }}>Client</label>
+              <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 'bold', marginBottom: '6px', color: '#374151' }}>
+                {globalClientId ? 'Client (Auto-Selected)' : 'Client'}
+              </label>
               <input 
                 type="text" placeholder="Search client..." value={clientSearch}
                 onChange={e => { setClientSearch(e.target.value); setFormData({ ...formData, client_id: '' }); setIsClientDropdownOpen(true); }}
                 onFocus={() => setIsClientDropdownOpen(true)}
                 onBlur={() => setTimeout(() => setIsClientDropdownOpen(false), 200)}
-                style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} required 
+                style={{ 
+                  width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box',
+                  backgroundColor: globalClientId && !editingId ? '#eff6ff' : '#ffffff' 
+                }} 
+                required 
               />
               {isClientDropdownOpen && (
                 <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff', border: '1px solid #d1d5db', borderRadius: '8px', marginTop: '4px', zIndex: 10, maxHeight: '150px', overflowY: 'auto', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}>
@@ -263,7 +291,6 @@ export default function WorkoutLogs() {
               )}
             </div>
 
-            {/* Exercise Searchable Dropdown */}
             <div style={{ position: 'relative' }}>
               <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 'bold', marginBottom: '6px', color: '#374151' }}>Exercise</label>
               <input 
@@ -286,7 +313,6 @@ export default function WorkoutLogs() {
             </div>
           </div>
 
-          {/* Dynamic Sets Area */}
           <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', padding: '20px', borderRadius: '8px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
               <h4 style={{ margin: 0, color: '#374151' }}>Working Sets</h4>
@@ -334,7 +360,9 @@ export default function WorkoutLogs() {
       {/* --- 3. RECENT LOGS TABLE --- */}
       <div style={{ background: '#fff', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
         <div style={{ padding: '20px', borderBottom: '1px solid #e5e7eb' }}>
-          <h3 style={{ margin: 0, color: '#111827' }}>Recent Entries</h3>
+          <h3 style={{ margin: 0, color: '#111827' }}>
+            {globalClientId ? 'Client\'s Recent Entries' : 'Recent Entries'}
+          </h3>
         </div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '950px' }}>
@@ -350,14 +378,13 @@ export default function WorkoutLogs() {
             <tbody>
               {isLoading ? (
                 <tr><td colSpan={5} style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Loading workout logs...</td></tr>
-              ) : logs.length === 0 ? (
+              ) : displayLogs.length === 0 ? (
                 <tr><td colSpan={5} style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>No workouts logged yet.</td></tr>
               ) : (
-                logs.map(log => {
+                displayLogs.map(log => {
                   const clientName = clientsList.find(c => c.id === log.client_id)?.name || 'Unknown';
                   const exerciseName = exercisesList.find(e => e.id === log.exercise_id)?.name || 'Unknown';
                   
-                  // --- 24 HOUR CHECK LOGIC ---
                   const now = new Date().getTime();
                   const logTime = new Date(log.created_at).getTime();
                   const isEditable = (now - logTime) <= (24 * 60 * 60 * 1000);

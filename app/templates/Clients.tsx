@@ -1,7 +1,5 @@
 "use client";
-import React, { useState, useEffect } from 'react';
-
-// Database bridge imported here!
+import React, { useState, useEffect, useMemo } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
 // --- TYPES ---
@@ -17,9 +15,14 @@ interface Client {
   renewal_status: string;
   notes: string;
   image_url?: string;
+  // Temporary fields for onboarding only
+  height?: number;
+  body_weight?: number;
+  muscle_mass?: number;
+  fat_mass?: number;
 }
 
-export default function Clients() {
+export default function Clients({ globalClientId }: { globalClientId?: number | string | null }) {
   // --- STATE MANAGEMENT ---
   const [clients, setClients] = useState<Client[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -29,7 +32,6 @@ export default function Clients() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formData, setFormData] = useState<Partial<Client>>({});
   
-  // NEW: State for the two-step delete confirmation
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   // Dynamic Dropdown States
@@ -57,8 +59,13 @@ export default function Clients() {
     setIsLoading(false);
   };
 
-  // --- ANALYTICS CALCULATIONS ---
-  const totalClients = clients.length;
+  // --- DERIVED DATA & CALCULATIONS ---
+  const filteredClients = useMemo(() => {
+    if (globalClientId) return clients.filter(c => c.id == globalClientId);
+    return clients;
+  }, [clients, globalClientId]);
+
+  const totalClients = clients.length; // Always show total gym roster
   
   const timingCounts = clients.reduce((acc, client) => {
     const time = client.timing || 'Unassigned';
@@ -76,25 +83,22 @@ export default function Clients() {
   const handleOpenNew = () => {
     setEditingClient(null);
     setFormData({ total_sessions: 12, sessions_remaining: 12, renewal_status: 'Up to Date' });
-    setIsConfirmingDelete(false); // Reset delete state just in case
+    setIsConfirmingDelete(false); 
     setIsModalOpen(true);
   };
 
   const handleOpenEdit = (client: Client) => {
     setEditingClient(client);
     setFormData(client);
-    setIsConfirmingDelete(false); // Reset delete state just in case
+    setIsConfirmingDelete(false); 
     setIsModalOpen(true);
   };
 
   const handleDelete = async () => {
     if (!editingClient?.id) return;
-    
     try {
       const { error } = await supabase.from('clients').delete().eq('id', editingClient.id);
       if (error) throw error;
-      
-      // Instantly remove from UI without needing a refresh
       setClients(clients.filter(c => c.id !== editingClient.id));
       setIsModalOpen(false);
       setIsConfirmingDelete(false);
@@ -104,7 +108,6 @@ export default function Clients() {
     }
   };
 
-  // Image Upload Handler (Creates a local preview URL for now)
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -113,7 +116,6 @@ export default function Clients() {
     }
   };
 
-  // Dynamic Option Handlers
   const handleAddCustomOption = (category: 'goal' | 'timing' | 'status') => {
     const newValue = prompt(`Enter new custom ${category}:`);
     if (!newValue || newValue.trim() === '') return;
@@ -133,44 +135,54 @@ export default function Clients() {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    // --- NEW VALIDATION CHECK ---
-    // 1. Grab the phone number they typed, or an empty string if it's blank
     const rawPhone = formData.phone || '';
-    
-    // 2. Strip out any spaces, plus signs, or dashes so we only count pure numbers
     const justNumbers = rawPhone.replace(/\D/g, '');
-    
-    // 3. Check if it has at least 10 digits
     if (justNumbers.length < 10) {
       alert("⚠️ Please enter a valid phone number with at least 10 digits.");
-      return; // This instantly stops the save process!
+      return; 
     }
-    // ----------------------------
 
     setIsSubmitting(true);
 
     try {
+      // Separate metrics from client data to avoid DB schema errors
+      const { height, body_weight, muscle_mass, fat_mass, ...clientPayload } = formData;
+
       const payload = {
-        ...formData,
-        age: formData.age ? parseInt(formData.age.toString(), 10) : null,
-        total_sessions: formData.total_sessions || 0,
-        sessions_remaining: formData.sessions_remaining || 0,
+        ...clientPayload,
+        age: clientPayload.age ? parseInt(clientPayload.age.toString(), 10) : null,
+        total_sessions: clientPayload.total_sessions || 0,
+        sessions_remaining: clientPayload.sessions_remaining || 0,
       };
 
       if (editingClient && editingClient.id) {
-        const { error } = await supabase
-          .from('clients')
-          .update(payload)
-          .eq('id', editingClient.id);
-          
+        // UPDATE EXISTING CLIENT
+        const { error } = await supabase.from('clients').update(payload).eq('id', editingClient.id);
         if (error) throw error;
       } else {
+        // INSERT NEW CLIENT
         delete payload.id;
-        const { error } = await supabase
-          .from('clients')
-          .insert([payload]);
-          
-        if (error) throw error;
+        // .select() returns the newly created row so we can get its generated ID
+        const { data: newClientData, error: clientError } = await supabase.from('clients').insert([payload]).select();
+        if (clientError) throw clientError;
+
+        // INSERT STARTING METRICS (If provided)
+        if (newClientData && newClientData.length > 0) {
+          const newClientId = newClientData[0].id;
+          if (height || body_weight || muscle_mass || fat_mass) {
+            const metricsPayload = {
+              client_id: newClientId,
+              date: new Date().toISOString().split('T')[0],
+              height: height ? parseFloat(height.toString()) : 0,
+              body_weight: body_weight ? parseFloat(body_weight.toString()) : 0,
+              muscle_mass: muscle_mass ? parseFloat(muscle_mass.toString()) : 0,
+              fat_mass: fat_mass ? parseFloat(fat_mass.toString()) : 0,
+              notes: 'Initial metrics taken on sign-up'
+            };
+            const { error: metricsError } = await supabase.from('body_metrics').insert([metricsPayload]);
+            if (metricsError) console.error("Metrics failed to save:", metricsError);
+          }
+        }
       }
       
       await fetchClients();
@@ -194,66 +206,107 @@ export default function Clients() {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', width: '100%' }}>
       
       {/* --- HEADER --- */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
-        <div>
-          <h2 style={{ margin: 0, color: '#111827', fontSize: '1.8rem' }}>Client Management</h2>
-          <p style={{ margin: '4px 0 0 0', color: '#6b7280' }}>Overview and roster details</p>
+      {!globalClientId && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
+          <div>
+            <h2 style={{ margin: 0, color: '#111827', fontSize: '1.8rem' }}>Client Management</h2>
+            <p style={{ margin: '4px 0 0 0', color: '#6b7280' }}>Overview and roster details</p>
+          </div>
+          <button onClick={handleOpenNew} style={{ padding: '10px 20px', backgroundColor: '#2563eb', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>
+            + Add New Client
+          </button>
         </div>
-        <button onClick={handleOpenNew} style={{ padding: '10px 20px', backgroundColor: '#2563eb', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>
-          + Add New Client
-        </button>
-      </div>
+      )}
 
-      {/* --- VISUALIZATIONS --- */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '24px' }}>
-        <div style={{ background: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', borderLeft: '4px solid #2563eb', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-          <h4 style={{ margin: '0 0 8px 0', color: '#6b7280' }}>Total Active Roster</h4>
-          <span style={{ fontSize: '3rem', fontWeight: '900', color: '#111827' }}>{totalClients}</span>
-        </div>
-
-        <div style={{ background: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
-          <h4 style={{ margin: '0 0 16px 0', color: '#374151' }}>Client Goals Breakdown</h4>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {Object.entries(goalCounts).map(([goal, count]) => (
-              <div key={goal}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '4px', fontWeight: 'bold' }}>
-                  <span>{goal}</span>
-                  <span style={{ color: '#6b7280' }}>{count} clients</span>
-                </div>
-                <div style={{ width: '100%', height: '8px', background: '#f3f4f6', borderRadius: '4px' }}>
-                  <div style={{ width: `${(count / totalClients) * 100}%`, height: '100%', background: '#10b981', borderRadius: '4px' }}></div>
-                </div>
+      {/* --- VISUALIZATIONS & PROFILES --- */}
+      {globalClientId && filteredClients.length > 0 ? (
+        // SELECTED CLIENT PROFILE
+        <div style={{ background: '#eff6ff', padding: '24px', borderRadius: '12px', border: '2px solid #3b82f6', display: 'flex', flexWrap: 'wrap', gap: '24px', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            {filteredClients[0].image_url ? (
+               <img src={filteredClients[0].image_url} alt={filteredClients[0].name} style={{ width: '80px', height: '80px', borderRadius: '50%', objectFit: 'cover', border: '3px solid white', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }} />
+            ) : (
+               <div style={{ width: '80px', height: '80px', borderRadius: '50%', backgroundColor: '#2563eb', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', color: 'white', fontSize: '2rem', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}>
+                 {filteredClients[0].name?.charAt(0) || '?'}
+               </div>
+            )}
+            <div>
+              <h2 style={{ margin: '0 0 4px 0', color: '#111827', fontSize: '1.8rem' }}>{filteredClients[0].name}</h2>
+              <div style={{ color: '#4b5563', fontSize: '1rem', fontWeight: 'bold' }}>Goal: <span style={{ color: '#2563eb' }}>{filteredClients[0].goal}</span></div>
+            </div>
+          </div>
+          
+          <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+            <div style={{ background: 'white', padding: '12px 20px', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+              <div style={{ fontSize: '0.85rem', color: '#6b7280', fontWeight: 'bold' }}>Timing</div>
+              <div style={{ fontSize: '1.1rem', color: '#111827', fontWeight: '900' }}>{filteredClients[0].timing}</div>
+            </div>
+            <div style={{ background: 'white', padding: '12px 20px', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+              <div style={{ fontSize: '0.85rem', color: '#6b7280', fontWeight: 'bold' }}>Sessions Remaining</div>
+              <div style={{ fontSize: '1.1rem', color: filteredClients[0].sessions_remaining < 3 ? '#ef4444' : '#10b981', fontWeight: '900' }}>
+                {filteredClients[0].sessions_remaining} / {filteredClients[0].total_sessions}
               </div>
-            ))}
-            {Object.keys(goalCounts).length === 0 && <span style={{fontSize: '0.85rem', color: '#9ca3af'}}>No data yet</span>}
+            </div>
           </div>
         </div>
+      ) : (
+        // GYM-WIDE STATS
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '24px' }}>
+          <div style={{ background: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', borderLeft: '4px solid #2563eb', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+            <h4 style={{ margin: '0 0 8px 0', color: '#6b7280' }}>Total Active Roster</h4>
+            <span style={{ fontSize: '3rem', fontWeight: '900', color: '#111827' }}>{totalClients}</span>
+          </div>
 
-        <div style={{ background: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
-          <h4 style={{ margin: '0 0 16px 0', color: '#374151' }}>Popular Timings</h4>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {Object.entries(timingCounts).map(([time, count]) => (
-              <div key={time}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '4px', fontWeight: 'bold' }}>
-                  <span>{time}</span>
-                  <span style={{ color: '#6b7280' }}>{count} clients</span>
+          <div style={{ background: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+            <h4 style={{ margin: '0 0 16px 0', color: '#374151' }}>Client Goals Breakdown</h4>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {Object.entries(goalCounts).map(([goal, count]) => (
+                <div key={goal}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '4px', fontWeight: 'bold' }}>
+                    <span>{goal}</span>
+                    <span style={{ color: '#6b7280' }}>{count} clients</span>
+                  </div>
+                  <div style={{ width: '100%', height: '8px', background: '#f3f4f6', borderRadius: '4px' }}>
+                    <div style={{ width: `${(count / totalClients) * 100}%`, height: '100%', background: '#10b981', borderRadius: '4px' }}></div>
+                  </div>
                 </div>
-                <div style={{ width: '100%', height: '8px', background: '#f3f4f6', borderRadius: '4px' }}>
-                  <div style={{ width: `${(count / totalClients) * 100}%`, height: '100%', background: '#8b5cf6', borderRadius: '4px' }}></div>
+              ))}
+              {Object.keys(goalCounts).length === 0 && <span style={{fontSize: '0.85rem', color: '#9ca3af'}}>No data yet</span>}
+            </div>
+          </div>
+
+          <div style={{ background: '#fff', padding: '20px', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+            <h4 style={{ margin: '0 0 16px 0', color: '#374151' }}>Popular Timings</h4>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {Object.entries(timingCounts).map(([time, count]) => (
+                <div key={time}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '4px', fontWeight: 'bold' }}>
+                    <span>{time}</span>
+                    <span style={{ color: '#6b7280' }}>{count} clients</span>
+                  </div>
+                  <div style={{ width: '100%', height: '8px', background: '#f3f4f6', borderRadius: '4px' }}>
+                    <div style={{ width: `${(count / totalClients) * 100}%`, height: '100%', background: '#8b5cf6', borderRadius: '4px' }}></div>
+                  </div>
                 </div>
-              </div>
-            ))}
-            {Object.keys(timingCounts).length === 0 && <span style={{fontSize: '0.85rem', color: '#9ca3af'}}>No data yet</span>}
+              ))}
+              {Object.keys(timingCounts).length === 0 && <span style={{fontSize: '0.85rem', color: '#9ca3af'}}>No data yet</span>}
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* --- CLIENT LIST TABLE --- */}
-      <div style={{ background: '#fff', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
-        <div style={{ overflowX: 'auto' }}>
+      <div style={{ background: '#fff', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', overflow: 'hidden', width: '100%' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', display: globalClientId ? 'flex' : 'none', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ margin: 0, color: '#111827' }}>Client Details</h3>
+          <button onClick={() => handleOpenEdit(filteredClients[0])} style={{ padding: '8px 16px', backgroundColor: '#f3f4f6', color: '#374151', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>
+            Edit Profile
+          </button>
+        </div>
+        <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch', width: '100%' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '900px' }}>
             <thead style={{ background: '#f9fafb' }}>
               <tr style={{ color: '#6b7280', fontSize: '0.85rem', textTransform: 'uppercase' }}>
@@ -261,20 +314,16 @@ export default function Clients() {
                 <th style={{ padding: '16px 20px', fontWeight: 'bold' }}>Details</th>
                 <th style={{ padding: '16px 20px', fontWeight: 'bold' }}>Sessions</th>
                 <th style={{ padding: '16px 20px', fontWeight: 'bold' }}>Renewal Status</th>
-                <th style={{ padding: '16px 20px', fontWeight: 'bold', textAlign: 'right' }}>Actions</th>
+                {!globalClientId && <th style={{ padding: '16px 20px', fontWeight: 'bold', textAlign: 'right' }}>Actions</th>}
               </tr>
             </thead>
             <tbody>
               {isLoading ? (
-                <tr>
-                  <td colSpan={5} style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Loading clients from database...</td>
-                </tr>
-              ) : clients.length === 0 ? (
-                <tr>
-                  <td colSpan={5} style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>No clients found. Click "Add New Client" to get started!</td>
-                </tr>
+                <tr><td colSpan={5} style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Loading clients from database...</td></tr>
+              ) : filteredClients.length === 0 ? (
+                <tr><td colSpan={5} style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>No clients found. Click "Add New Client" to get started!</td></tr>
               ) : (
-                clients.map(client => {
+                filteredClients.map(client => {
                   const badge = getStatusBadge(client.renewal_status);
                   return (
                     <tr key={client.id} style={{ borderBottom: '1px solid #e5e7eb' }}>
@@ -303,12 +352,13 @@ export default function Clients() {
                           {client.renewal_status}
                         </span>
                       </td>
-                      <td style={{ padding: '16px 20px', textAlign: 'right' }}>
-                        {/* CLEANED UI: Only the Edit button remains on the main table */}
-                        <button onClick={() => handleOpenEdit(client)} style={{ padding: '6px 16px', background: 'transparent', color: '#2563eb', border: '1px solid #bfdbfe', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', transition: 'all 0.2s' }}>
-                          Edit
-                        </button>
-                      </td>
+                      {!globalClientId && (
+                        <td style={{ padding: '16px 20px', textAlign: 'right' }}>
+                          <button onClick={() => handleOpenEdit(client)} style={{ padding: '6px 16px', background: 'transparent', color: '#2563eb', border: '1px solid #bfdbfe', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', transition: 'all 0.2s' }}>
+                            Edit
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   );
                 })
@@ -324,10 +374,9 @@ export default function Clients() {
           <div style={{ background: '#fff', width: '100%', maxWidth: '700px', borderRadius: '16px', padding: '24px', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)', maxHeight: '90vh', overflowY: 'auto' }}>
             <h2 style={{ margin: '0 0 20px 0', color: '#111827' }}>{editingClient ? 'Edit Client' : 'Add New Client'}</h2>
             
-            <form onSubmit={handleSave} style={{ display: 'grid', gap: '16px', gridTemplateColumns: '1fr 1fr' }}>
+            <form onSubmit={handleSave} style={{ display: 'grid', gap: '16px', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
               
-              {/* Image Upload Field */}
-              <div style={{ gridColumn: 'span 2', display: 'flex', alignItems: 'center', gap: '16px', padding: '12px', border: '1px dashed #d1d5db', borderRadius: '8px' }}>
+              <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '16px', padding: '12px', border: '1px dashed #d1d5db', borderRadius: '8px' }}>
                  {formData.image_url ? (
                     <img src={formData.image_url} alt="Preview" style={{ width: '60px', height: '60px', borderRadius: '50%', objectFit: 'cover' }} />
                  ) : (
@@ -339,7 +388,7 @@ export default function Clients() {
                  </div>
               </div>
 
-              <div style={{ gridColumn: 'span 2' }}>
+              <div style={{ gridColumn: '1 / -1' }}>
                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 'bold', marginBottom: '6px', color: '#374151' }}>Full Name</label>
                 <input required type="text" value={formData.name || ''} onChange={e => setFormData({...formData, name: e.target.value})} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} />
               </div>
@@ -354,7 +403,7 @@ export default function Clients() {
                 <input type="text" value={formData.phone || ''} onChange={e => setFormData({...formData, phone: e.target.value})} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} />
               </div>
 
-              <div style={{ gridColumn: 'span 1' }}>
+              <div>
                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 'bold', marginBottom: '6px', color: '#374151' }}>Primary Goal</label>
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <select required value={formData.goal || ''} onChange={e => setFormData({...formData, goal: e.target.value})} style={{ flex: 1, padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }}>
@@ -365,7 +414,7 @@ export default function Clients() {
                 </div>
               </div>
 
-              <div style={{ gridColumn: 'span 1' }}>
+              <div>
                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 'bold', marginBottom: '6px', color: '#374151' }}>Preferred Timing</label>
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <select required value={formData.timing || ''} onChange={e => setFormData({...formData, timing: e.target.value})} style={{ flex: 1, padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }}>
@@ -386,7 +435,7 @@ export default function Clients() {
                 <input required type="number" value={formData.sessions_remaining || ''} onChange={e => setFormData({...formData, sessions_remaining: parseInt(e.target.value)})} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} />
               </div>
 
-              <div style={{ gridColumn: 'span 2' }}>
+              <div style={{ gridColumn: '1 / -1' }}>
                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 'bold', marginBottom: '6px', color: '#374151' }}>Renewal Status</label>
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <select required value={formData.renewal_status || ''} onChange={e => setFormData({...formData, renewal_status: e.target.value})} style={{ flex: 1, padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }}>
@@ -396,49 +445,62 @@ export default function Clients() {
                 </div>
               </div>
 
-              <div style={{ gridColumn: 'span 2' }}>
+              {/* NEW: INITIAL METRICS (Only show when creating a brand new client) */}
+              {!editingClient && (
+                <div style={{ gridColumn: '1 / -1', background: '#f9fafb', padding: '16px', borderRadius: '8px', border: '1px solid #e5e7eb', marginTop: '12px' }}>
+                  <h4 style={{ margin: '0 0 12px 0', color: '#4b5563', fontSize: '0.9rem' }}>Initial Body Metrics (Optional)</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '12px' }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 'bold', marginBottom: '4px', color: '#6b7280' }}>Height (cm)</label>
+                      <input type="number" step="0.1" placeholder="170" value={formData.height || ''} onChange={e => setFormData({...formData, height: parseFloat(e.target.value)})} style={{ width: '100%', padding: '8px', border: '1px solid #d1d5db', borderRadius: '6px', boxSizing: 'border-box' }} />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 'bold', marginBottom: '4px', color: '#6b7280' }}>Weight (kg)</label>
+                      <input type="number" step="0.1" placeholder="0.0" value={formData.body_weight || ''} onChange={e => setFormData({...formData, body_weight: parseFloat(e.target.value)})} style={{ width: '100%', padding: '8px', border: '1px solid #d1d5db', borderRadius: '6px', boxSizing: 'border-box' }} />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 'bold', marginBottom: '4px', color: '#6b7280' }}>Muscle (kg)</label>
+                      <input type="number" step="0.1" placeholder="0.0" value={formData.muscle_mass || ''} onChange={e => setFormData({...formData, muscle_mass: parseFloat(e.target.value)})} style={{ width: '100%', padding: '8px', border: '1px solid #d1d5db', borderRadius: '6px', boxSizing: 'border-box' }} />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 'bold', marginBottom: '4px', color: '#6b7280' }}>Fat Mass (%)</label>
+                      <input type="number" step="0.1" placeholder="0.0" value={formData.fat_mass || ''} onChange={e => setFormData({...formData, fat_mass: parseFloat(e.target.value)})} style={{ width: '100%', padding: '8px', border: '1px solid #d1d5db', borderRadius: '6px', boxSizing: 'border-box' }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ gridColumn: '1 / -1' }}>
                 <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 'bold', marginBottom: '6px', color: '#374151' }}>Coach Notes</label>
                 <textarea rows={3} placeholder="Add any specific requirements, injuries, or notes here..." value={formData.notes || ''} onChange={e => setFormData({...formData, notes: e.target.value})} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box', fontFamily: 'inherit' }} />
               </div>
 
-              {/* NEW MODAL FOOTER: Delete on the left, Save/Cancel on the right */}
-              <div style={{ gridColumn: 'span 2', marginTop: '16px', paddingTop: '16px', borderTop: '1px solid #e5e7eb', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                
-                {/* Left Side: Two-Step Delete Mechanism */}
+              <div style={{ gridColumn: '1 / -1', marginTop: '16px', paddingTop: '16px', borderTop: '1px solid #e5e7eb', display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
                 <div>
                   {editingClient && (
                     isConfirmingDelete ? (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                         <span style={{ color: '#ef4444', fontSize: '0.85rem', fontWeight: 'bold' }}>Are you sure?</span>
-                        <button type="button" onClick={handleDelete} style={{ padding: '8px 16px', background: '#ef4444', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>
-                          Yes, Delete
-                        </button>
-                        <button type="button" onClick={() => setIsConfirmingDelete(false)} style={{ padding: '8px 16px', background: '#f3f4f6', color: '#4b5563', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>
-                          Cancel
-                        </button>
+                        <button type="button" onClick={handleDelete} style={{ padding: '8px 16px', background: '#ef4444', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>Yes, Delete</button>
+                        <button type="button" onClick={() => setIsConfirmingDelete(false)} style={{ padding: '8px 16px', background: '#f3f4f6', color: '#4b5563', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>Cancel</button>
                       </div>
                     ) : (
-                      <button type="button" onClick={() => setIsConfirmingDelete(true)} style={{ padding: '8px 16px', background: '#fee2e2', color: '#991b1b', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>
-                        Delete Client
-                      </button>
+                      <button type="button" onClick={() => setIsConfirmingDelete(true)} style={{ padding: '8px 16px', background: '#fee2e2', color: '#991b1b', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>Delete Client</button>
                     )
                   )}
                 </div>
 
-                {/* Right Side: Standard Save & Cancel */}
-                <div style={{ display: 'flex', gap: '12px' }}>
+                <div style={{ display: 'flex', gap: '12px', flexGrow: 1, justifyContent: 'flex-end' }}>
                   <button type="button" onClick={() => setIsModalOpen(false)} disabled={isSubmitting} style={{ padding: '10px 20px', background: '#f3f4f6', color: '#4b5563', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>Cancel</button>
                   <button type="submit" disabled={isSubmitting} style={{ padding: '10px 20px', background: '#2563eb', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', opacity: isSubmitting ? 0.7 : 1 }}>
                     {isSubmitting ? 'Saving...' : 'Save Client'}
                   </button>
                 </div>
-                
               </div>
             </form>
           </div>
         </div>
       )}
-
     </div>
   );
 }

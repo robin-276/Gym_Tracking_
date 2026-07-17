@@ -11,7 +11,13 @@ interface Exercise {
   muscle_group: string;
 }
 
-export default function ExerciseLibrary() {
+interface ExerciseLibraryProps {
+  globalClientId: number | null;
+}
+
+export default function ExerciseLibrary({
+  globalClientId,
+}: ExerciseLibraryProps) {
   // --- LIVE DATABASE STATE ---
   const [exercises, setExercises] = useState<Exercise[]>([]);
   const [isLoading, setIsLoading] = useState(true);
